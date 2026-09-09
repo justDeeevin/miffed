@@ -1,62 +1,137 @@
 use crate::{
-    ast::{
-        Addr, Address, BinCond, Binop, Condition, Index, Instruction, MemOp, Program, Register,
-        UnaryCond, Unaryop, Value,
-    },
+    ast::{Constant, Data, Instruction, Program, Statement},
     lex::Token,
 };
 use chumsky::{
-    IterParser, ParseResult, Parser,
-    error::Rich,
+    combinator::Repeated,
     extra::Err,
-    input::{Input, Stream, ValueInput},
-    primitive::{choice, just, none_of, one_of},
-    select,
-    span::SimpleSpan,
+    input::{Stream, ValueInput},
+    prelude::*,
 };
 use logos::Logos;
-use std::collections::HashMap;
+use std::{borrow::Cow, fmt::Display};
 
 type Extra<'a> = Err<Rich<'a, Token<'a>>>;
 
 pub fn parse_program(input: &str) -> ParseResult<Program<'_>, Rich<'_, Token<'_>>> {
     let lexer = Token::lexer(input)
         .spanned()
-        .map(|(token, span)| (token.unwrap_or(Token::Error), SimpleSpan::from(span)));
+        .map(|(token, span)| (token.unwrap_or_else(Token::Error), SimpleSpan::from(span)));
 
-    let token_stream = Stream::from_iter(lexer).map((0..input.len()).into(), |t| t);
+    let token_stream = Stream::from_iter(lexer).map((input.len()..input.len()).into(), |t| t);
 
-    let parser = just(Token::Newline)
-        .or_not()
+    let parser = newlines()
         .ignore_then(parse_data_section())
-        .then_ignore(just(Token::Newline))
-        .then(parse_text_section())
-        .then_ignore(just(Token::Newline).or_not())
+        .then_ignore(newlines())
+        .then(parse_text_section().collect())
+        .then_ignore(newlines())
         .map(|(data, text)| Program { data, text });
-
-    #[cfg(feature = "debug")]
-    let _ = std::fs::write("parser.svg", parser.debug().to_railroad_svg().to_string());
 
     parser.parse(token_stream)
 }
 
 fn parse_data_section<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>>()
--> impl Parser<'a, I, HashMap<&'a str, Vec<u8>>, Extra<'a>> {
-    just(Token::Dot)
-        .ignore_then(just(Token::Ident("data")))
+-> impl Parser<'a, I, Vec<Data<'a>>, Extra<'a>> {
+    just(Token::Ident(".data"))
         .labelled("data directive")
-        .ignore_then(just(Token::Newline))
+        .ignore_then(newlines().at_least(1))
         .ignore_then(
             parse_label(Some("data"))
-                .then(parse_data())
-                .separated_by(just(Token::Newline))
+                .or_not()
+                .then(parse_constant())
+                .map(|(label, constant)| Data { label, constant })
+                .separated_by(newlines().at_least(1))
                 .collect(),
         )
         .labelled("data section")
 }
 
+fn parse_constant<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>>()
+-> impl Parser<'a, I, Constant<'a>, Extra<'a>> {
+    choice((
+        just(Token::Ident(".ascii")).ignore_then(parse_string(false)),
+        just(Token::Ident(".asciiz")).ignore_then(parse_string(true)),
+        just(Token::Ident(".byte")).ignore_then(parse_numbers(Constant::Bytes)),
+        just(Token::Ident(".half")).ignore_then(parse_numbers(Constant::Halves)),
+        just(Token::Ident(".word")).ignore_then(parse_numbers(Constant::Words)),
+        just(Token::Ident(".space")).ignore_then(parse_number().map(Constant::Space)),
+    ))
+    .labelled("constant")
+}
+
+fn parse_string<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>>(
+    z: bool,
+) -> impl Parser<'a, I, Constant<'a>, Extra<'a>> {
+    select!(Token::String(s) => s)
+        .labelled("string")
+        .try_map(move |s, span: SimpleSpan| {
+            let mut contents = Cow::Borrowed(s);
+            let mut chars = s.char_indices();
+
+            while let Some((i, c)) = chars.next() {
+                if c == '\\' {
+                    let string = match &mut contents {
+                        Cow::Borrowed(s) => {
+                            contents = Cow::Owned(String::with_capacity(s.len()) + &s[..i]);
+                            contents.to_mut()
+                        }
+                        Cow::Owned(s) => s,
+                    };
+
+                    let escape = chars.next().unwrap().1;
+                    let start = span.start() + 1;
+                    match escape {
+                        'n' => string.push('\n'),
+                        't' => string.push('\t'),
+                        'r' => string.push('\r'),
+                        '\\' => string.push('\\'),
+                        '"' => string.push('"'),
+                        _ => {
+                            return Err(Rich::custom(
+                                (start + i
+                                    ..start + chars.next().map(|(i, _)| i).unwrap_or(s.len()))
+                                    .into(),
+                                "Unknown escape character",
+                            ));
+                        }
+                    }
+                } else {
+                    if let Cow::Owned(s) = &mut contents {
+                        s.push(c);
+                    }
+                }
+            }
+
+            Ok(Constant::String { contents, z })
+        })
+}
+
+fn parse_numbers<
+    'a,
+    N: TryFrom<i32, Error: Display>,
+    I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>,
+>(
+    wrap: impl Fn(Vec<N>) -> Constant<'a>,
+) -> impl Parser<'a, I, Constant<'a>, Extra<'a>> {
+    parse_number()
+        .separated_by(just(Token::Comma))
+        .collect()
+        .map(wrap)
+        .labelled("comma-separated numbers")
+}
+
+fn parse_number<
+    'a,
+    N: TryFrom<i32, Error: Display>,
+    I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>,
+>() -> impl Parser<'a, I, N, Extra<'a>> {
+    select!(Token::Number(n) => n)
+        .labelled("number")
+        .try_map(|n, span| N::try_from(n).map_err(|e| Rich::custom(span, e.to_string())))
+}
+
 fn parse_label<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>>(
-    label_kind: Option<&'a str>,
+    label_kind: Option<&str>,
 ) -> impl Parser<'a, I, &'a str, Extra<'a>> {
     select!(Token::Ident(i) => i)
         .labelled("identifier")
@@ -67,215 +142,26 @@ fn parse_label<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>>(
         ))
 }
 
-fn parse_data<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>>()
--> impl Parser<'a, I, Vec<u8>, Extra<'a>> {
-    just(Token::Dot)
-        .ignore_then(choice((
-            just(Token::Ident("word"))
-                .labelled("word directive")
-                .ignore_then(
-                    parse_number()
-                        .map(i32::to_le_bytes)
-                        .repeated()
-                        .fold(Vec::new(), |mut acc, bytes| {
-                            acc.extend(bytes);
-                            acc
-                        })
-                        .labelled("words"),
-                ),
-            just(Token::Ident("asciiz"))
-                .labelled("asciiz directive")
-                .ignore_then(select!(Token::String(s) => parse_string().parse(s).unwrap())),
-        )))
-        .repeated()
-        .fold(Vec::new(), |mut acc, bytes| {
-            acc.extend(bytes);
-            acc
-        })
-        .labelled("data")
-}
-
 fn parse_text_section<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>>()
--> impl Parser<'a, I, Vec<(Option<&'a str>, Instruction<'a>)>, Extra<'a>> {
-    just(Token::Dot)
-        .ignore_then(just(Token::Ident("text")))
-        .labelled("text directive")
-        .ignore_then(just(Token::Newline))
+-> impl IterParser<'a, I, Statement<'a>, Extra<'a>> {
+    just(Token::Ident(".text"))
+        .ignore_then(newlines().at_least(1))
         .ignore_then(
-            parse_label(Some("text"))
-                .or_not()
-                .then(parse_instruction())
-                .separated_by(just(Token::Newline))
-                .collect()
-                .labelled("text"),
+            select!(Token::Ident(i) => i)
+                .labelled("identifier")
+                .then_ignore(just(Token::Colon))
+                .map(Statement::Label)
+                .or(parse_instruction().map(Statement::Instruction)),
         )
-        .labelled("text section")
+        .separated_by(newlines().at_least(1))
 }
 
 fn parse_instruction<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>>()
--> impl Parser<'a, I, Instruction<'a>, Extra<'a>> {
-    use Token::*;
-    choice((
-        select! {
-            Add => Binop::Add,
-            Sub=> Binop::Sub,
-            Mul => Binop::Mul,
-            Div => Binop::Div,
-            Rem => Binop::Rem,
-            And => Binop::And,
-            Or => Binop::Or,
-            Sll => Binop::Sll,
-            Slr => Binop::Slr,
-        }
-        .labelled("binary operator")
-        .then(parse_register())
-        .then_ignore(just(Token::Comma))
-        .then(parse_register())
-        .then_ignore(just(Token::Comma))
-        .then(parse_value())
-        .map(|(((op, dst), lhs), rhs)| Instruction::Binop { op, dst, lhs, rhs }),
-        select! {
-            Not => Unaryop::Not,
-            Abs => Unaryop::Abs,
-            Neg => Unaryop::Neg,
-        }
-        .labelled("unary operator")
-        .then(parse_register())
-        .then_ignore(just(Token::Comma))
-        .then(parse_register())
-        .map(|((op, dst), rhs)| Instruction::Unaryop { op, dst, rhs }),
-        select! {
-            Beq => BinCond::Eq,
-            Bne => BinCond::Ne,
-            Bge => BinCond::Ge,
-            Bgt => BinCond::Gt,
-            Ble => BinCond::Le,
-            Blt => BinCond::Lt,
-        }
-        .labelled("binary condition")
-        .then(parse_register())
-        .then_ignore(just(Token::Comma))
-        .then(parse_value())
-        .map(|((cond, lhs), rhs)| Condition::Binary { cond, lhs, rhs })
-        .or(select!(
-            Beqz => UnaryCond::Eqz,
-            Bnez => UnaryCond::Nez,
-            Bgez => UnaryCond::Gez,
-            Bgtz => UnaryCond::Gtz,
-            Blez => UnaryCond::Lez,
-            Bltz => UnaryCond::Ltz,
-        )
-        .labelled("unary condition")
-        .then(parse_register())
-        .then_ignore(just(Token::Comma))
-        .map(|(cond, rhs)| Condition::Unary { cond, rhs }))
-        .or(just(Token::Jmp).to(Condition::Always))
-        .then(parse_address())
-        .map(|(cond, dst)| Instruction::Branch { cond, dst }),
-        just(Token::Move)
-            .ignore_then(parse_register())
-            .then_ignore(just(Token::Comma))
-            .then(parse_register())
-            .map(|(dst, src)| Instruction::Move { dst, src }),
-        just(Token::Li)
-            .ignore_then(parse_register())
-            .then_ignore(just(Token::Comma))
-            .then(parse_number())
-            .map(|(dst, src)| Instruction::Li { dst, src }),
-        select! {
-            Token::Lw => MemOp::Load,
-            Token::Sw => MemOp::Store,
-            Token::La => MemOp::LoadAddr
-        }
-        .labelled("load/store operation")
-        .then(parse_register())
-        .then_ignore(just(Token::Comma))
-        .then(
-            parse_address().map(Value::Const).or(parse_number()
-                .or_not()
-                .then_ignore(just(Token::LParen))
-                .then(parse_register())
-                .then_ignore(just(Token::RParen))
-                .map(|(offset, addr)| {
-                    Value::Dynamic(Index {
-                        offset: offset.unwrap_or_default() as Addr,
-                        addr,
-                    })
-                })),
-        )
-        .map(|((op, reg), addr)| Instruction::Mem { op, reg, addr }),
-        just(Token::Syscall).to(Instruction::Syscall),
-        just(Token::Nop).to(Instruction::Nop),
-    ))
-    .labelled("instruction")
+-> impl Parser<'a, I, Instruction, Extra<'a>> {
+    todo()
 }
 
-fn parse_address<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>>()
--> impl Parser<'a, I, Address<'a>, Extra<'a>> {
-    select!(
-        Token::Number(n) => Address::Literal(n as usize),
-        Token::Ident(i) => Address::Label(i)
-    )
-    .labelled("address")
-}
-
-fn parse_number<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>>()
--> impl Parser<'a, I, i32, Extra<'a>> {
-    select!(Token::Number(n) => n).labelled("number")
-}
-
-fn parse_value<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>>()
--> impl Parser<'a, I, Value, Extra<'a>> {
-    select!(Token::Number(n) => Value::Const(n), Token::Register(r) => Value::Dynamic(r))
-        .labelled("value")
-}
-
-fn parse_register<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>>()
--> impl Parser<'a, I, Register, Extra<'a>> {
-    select!(Token::Register(r) => r).labelled("register")
-}
-
-fn parse_string<'a>() -> impl Parser<'a, &'a str, Vec<u8>> {
-    none_of("\\")
-        .repeated()
-        .collect::<String>()
-        .then_ignore(just('\\'))
-        .then(
-            choice((
-                select!(
-                    'a' => b'\x07',
-                    'b' => b'\x08',
-                    'f' => b'\x0c',
-                    'n' => b'\n',
-                    'r' => b'\r',
-                    't' => b'\t',
-                    'v' => b'\x0b',
-                ),
-                one_of("01234567")
-                    .repeated()
-                    .at_least(1)
-                    .at_most(3)
-                    .collect::<String>()
-                    .map(|c| c.parse().unwrap()),
-                just('x').ignore_then(
-                    one_of("0123456789abcdefABCDEF")
-                        .repeated()
-                        .at_least(1)
-                        .collect::<String>()
-                        .map(|s| u8::from_str_radix(&s, 16).unwrap()),
-                ),
-            ))
-            .labelled("escape sequence"),
-        )
-        .repeated()
-        .fold(Vec::new(), |mut acc, (string, byte)| {
-            acc.extend(string.bytes());
-            acc.push(byte);
-            acc
-        })
-        .map(|mut bytes| {
-            bytes.push(0);
-            bytes
-        })
-        .labelled("string")
+fn newlines<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>>()
+-> Repeated<impl Parser<'a, I, (), Extra<'a>>, (), I, Extra<'a>> {
+    just(Token::Newline).ignored().repeated()
 }
