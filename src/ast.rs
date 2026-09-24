@@ -4,110 +4,183 @@ use thiserror::Error;
 #[derive(Debug)]
 pub struct Program<'a> {
     pub data: Vec<Data<'a>>,
-    pub text: Vec<Statement<'a>>,
+    pub text: Vec<(Option<&'a str>, Instruction<'a>)>,
 }
 
-#[derive(Debug)]
-pub enum Statement<'a> {
-    Label(&'a str),
-    Instruction(Instruction),
-}
-
-#[derive(Debug)]
-pub enum Instruction {
-    R {
-        rs: Register,
-        rt: Register,
-        rd: Register,
-        shamt: u8,
-        funct: Funct,
+#[derive(Debug, Clone)]
+pub enum Instruction<'a> {
+    Binop {
+        op: Binop,
+        dst: Register,
+        lhs: Register,
+        rhs: Value,
     },
-    I {
-        op: IOp,
-        rs: Register,
-        rt: Register,
-        imm: i16,
+    Unop {
+        op: Unop,
+        dst: Register,
+        src: Value,
     },
-    J {
-        op: JOp,
-        offset: i32,
+    MoveHiLo {
+        reg: Register,
+        hi: bool,
+        to: bool,
     },
+    La {
+        dst: Register,
+        addr: Address<'a>,
+    },
+    Mem {
+        op: MemOp,
+        reg: Register,
+        offset: Address<'a>,
+        addr: Option<Register>,
+        width: Width,
+    },
+    Branch {
+        cond: Condition,
+        target: Address<'a>,
+        link: bool,
+    },
+    Jump {
+        target: Value<Address<'a>>,
+        link: bool,
+    },
+    Syscall,
     Nop,
+    Trap(Condition),
+    Break,
 }
 
-#[derive(Debug)]
-pub enum JOp {
-    J = 2,
-    Jal,
+#[derive(Debug, Clone)]
+pub enum MemOp {
+    Load,
+    Store,
 }
 
-#[derive(Debug)]
-pub enum IOp {
-    /// There are many with the opcode 1 :<
-    One = 1,
-    Beq = 4,
-    Bne,
-    Blez,
-    Bgtz,
+#[derive(Debug, Clone)]
+pub enum Width {
+    Byte,
+    ByteUnaligned,
+    Half,
+    HalfUnaligned,
+    Word,
+    WordLeft,
+    WordRight,
+    Double,
+}
+
+#[derive(Debug, Clone)]
+pub enum Address<'a, L = usize> {
+    Label(&'a str),
+    Literal(L),
+}
+
+#[derive(Debug, Clone)]
+pub enum Condition {
+    Binary {
+        cond: BinCond,
+        lhs: Register,
+        rhs: Value,
+    },
+    Unary {
+        cond: UnCond,
+        src: Value,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum UnCond {
+    Gez,
+    Gtz,
+    Lez,
+    Ltz,
+    Eqz,
+    Nez,
+}
+
+#[derive(Debug, Clone)]
+pub enum BinCond {
+    Eq,
+    Ne,
+    Ge,
+    Geu,
+    Gt,
+    Gtu,
+    Le,
+    Leu,
+    Lt,
+    Ltu,
+}
+
+#[derive(Debug, Clone)]
+pub enum Unop {
+    Abs,
+    Clo,
+    Clz,
+    Move,
+    Neg,
+    Negu,
+    Not,
+    Lui,
+    Li,
+}
+
+#[derive(Debug, Clone)]
+pub enum Binop {
+    Add,
+    Addu,
     Addi,
     Addiu,
-    Slti,
-    Sltiu,
+    And,
     Andi,
-    Ori,
-    Xori,
-    Lui,
-    Lb = 0x20,
-    Lh,
-    Lwl,
-    Lw,
-    Lbu,
-    Lhu,
-    Lwr,
-    Sb = 0x28,
-    Sh,
-    Swl,
-    Sw,
-    Swr = 0x2e,
-}
-
-#[derive(Debug)]
-pub enum Funct {
-    Sll,
-    Srl = 2,
-    Sra,
-    Sllv,
-    Srlv = 6,
-    Srav,
-    Jr,
-    Jalr,
-    Movz,
-    Movn,
-    Syscall,
-    Break,
-    Mfhi = 16,
-    Mthi,
-    Mflo,
-    Mtlo,
-    Mult = 24,
-    Multu,
     Div,
     Divu,
-    Add = 32,
-    Addu,
+    Movn,
+    Movz,
+    Mult,
+    Multu,
+    Mul,
+    Mulo,
+    Mulou,
+    Madd,
+    Maddu,
+    Msub,
+    Msubu,
+    Nor,
+    Or,
+    Ori,
+    Rem,
+    Remu,
+    Sll,
+    Sllv,
+    Sra,
+    Srav,
+    Srl,
+    Srlv,
+    Rol,
+    Ror,
     Sub,
     Subu,
-    And,
-    Or,
     Xor,
-    Nor,
-    Slt = 42,
+    Xori,
+    Slt,
     Sltu,
-    Tge = 48,
-    Tgeu,
-    Tlt,
-    Tltu,
-    Teq = 54,
+    Slti,
+    Sltiu,
+    Seq,
+    Sge,
+    Sgeu,
+    Sgt,
+    Sgtu,
+    Sle,
+    Sleu,
+    Sne,
+}
+
+#[derive(Debug, Clone)]
+pub enum Value<C = i32, D = Register> {
+    Constant(C),
+    Dynamic(D),
 }
 
 #[derive(Debug)]
