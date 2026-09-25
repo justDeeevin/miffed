@@ -265,6 +265,8 @@ fn parse_instruction<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>
         .or(select! {
             Token::Sb => Width::Byte,
             Token::Sh => Width::Half,
+            Token::Swl => Width::WordLeft,
+            Token::Swr => Width::WordRight,
             Token::Sw => Width::Word,
             Token::Sd => Width::Double,
         }
@@ -324,17 +326,29 @@ fn parse_instruction<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>
         .then_ignore(just(Token::Comma))
         .then(parse_address())
         .map(|((cond, link), target)| Instruction::Branch { cond, target, link }),
-        select!(Token::J => false, Token::Jal => true)
+        select!(Token::J | Token::B => false, Token::Jal => true)
             .labelled("static jump operation")
             .then(parse_address().map(Value::Constant))
             .or(select!(Token::Jr => false, Token::Jalr => true)
                 .labelled("dynamic jump operation")
                 .then(parse_register().map(Value::Dynamic)))
             .map(|(link, target)| Instruction::Jump { target, link }),
+        select! {
+            Token::Teq | Token::Teqi => BinCond::Eq,
+            Token::Tne | Token::Tnei => BinCond::Ne,
+            Token::Tge | Token::Tgei => BinCond::Ge,
+            Token::Tgeu | Token::Tgeiu => BinCond::Geu,
+            Token::Tlt | Token::Tlti => BinCond::Lt,
+            Token::Tltu | Token::Tltiu => BinCond::Ltu,
+        }
+        .labelled("trap operation")
+        .then(parse_register())
+        .then_ignore(just(Token::Comma))
+        .then(parse_value())
+        .map(|((cond, lhs), rhs)| Instruction::Trap { cond, lhs, rhs }),
         just(Token::Syscall).to(Instruction::Syscall),
         just(Token::Nop).to(Instruction::Nop),
         just(Token::Break).to(Instruction::Break),
-        // TODO: trap
     ))
     .labelled("instruction")
 }

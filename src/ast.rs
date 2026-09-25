@@ -45,9 +45,13 @@ pub enum Instruction<'a> {
         target: Value<Address<'a>>,
         link: bool,
     },
+    Trap {
+        cond: BinCond,
+        lhs: Register,
+        rhs: Value,
+    },
     Syscall,
     Nop,
-    Trap(Condition),
     Break,
 }
 

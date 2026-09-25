@@ -95,7 +95,7 @@ pub enum Token<'a> {
     /// mflo $1
     /// ```
     Mulo,
-    #[token("Mulou")]
+    #[token("mulou")]
     /// Pseudo-instruction expansion:
     /// ```asm
     /// multu $2, $3
