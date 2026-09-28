@@ -10,7 +10,10 @@ use std::{borrow::Cow, fmt::Display};
 
 type Extra<'a> = Err<Rich<'a, Token<'a>>>;
 
-pub fn parse_program(input: &str) -> ParseResult<Program<'_>, Rich<'_, Token<'_>>> {
+pub fn parse_program(
+    input: &str,
+    delay_slot: bool,
+) -> ParseResult<Program<'_>, Rich<'_, Token<'_>>> {
     let lexer = Token::lexer(input)
         .spanned()
         .map(|(token, span)| (token.unwrap_or_else(Token::Error), SimpleSpan::from(span)));
@@ -22,7 +25,11 @@ pub fn parse_program(input: &str) -> ParseResult<Program<'_>, Rich<'_, Token<'_>
         .then_ignore(newlines())
         .then(parse_text_section())
         .then_ignore(newlines())
-        .map(|(data, text)| Program { data, text });
+        .map(|(data, text)| Program {
+            data,
+            text,
+            delay_slot,
+        });
 
     #[cfg(feature = "debug")]
     let _ = std::fs::write("parser.svg", parser.debug().to_railroad_svg().to_string());
@@ -125,8 +132,8 @@ fn parse_number<
     I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>,
 >() -> impl Parser<'a, I, N, Extra<'a>> {
     select!(Token::Number(n) => n)
-        .labelled("number")
         .try_map(|n, span| N::try_from(n).map_err(|e| Rich::custom(span, e.to_string())))
+        .labelled("number")
 }
 
 fn parse_label<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>>()
@@ -174,15 +181,9 @@ fn parse_instruction<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>
             Divu,
             Movn,
             Movz,
-            Mult,
-            Multu,
             Mul,
             Mulo,
             Mulou,
-            Madd,
-            Maddu,
-            Msub,
-            Msubu,
             Nor,
             Or,
             Ori,
@@ -224,7 +225,15 @@ fn parse_instruction<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>
             Abs,
             Clo,
             Clz,
+            Div,
+            Divu,
+            Madd,
+            Maddu,
             Move,
+            Msub,
+            Msubu,
+            Mult,
+            Multu,
             Neg,
             Negu,
             Not,
@@ -248,8 +257,8 @@ fn parse_instruction<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>
         just(Token::La)
             .ignore_then(parse_register())
             .then_ignore(just(Token::Comma))
-            .then(parse_address())
-            .map(|(dst, addr)| Instruction::La { dst, addr }),
+            .then(parse_index())
+            .map(|(dst, index)| Instruction::La { dst, index }),
         select! {
             Token::Lb => Width::Byte,
             Token::Lbu => Width::ByteUnaligned,
@@ -274,18 +283,11 @@ fn parse_instruction<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>
         .map(|width| (MemOp::Store, width)))
         .then(parse_register())
         .then_ignore(just(Token::Comma))
-        .then(parse_address())
-        .then(
-            just(Token::LParen)
-                .ignore_then(parse_register())
-                .then_ignore(just(Token::RParen))
-                .or_not(),
-        )
-        .map(|((((op, width), reg), offset), addr)| Instruction::Mem {
+        .then(parse_index())
+        .map(|(((op, width), reg), index)| Instruction::Mem {
             op,
             reg,
-            offset,
-            addr,
+            index,
             width,
         }),
         select! {
@@ -304,7 +306,7 @@ fn parse_instruction<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>
         .then(parse_register())
         .then_ignore(just(Token::Comma))
         .then(parse_value())
-        .map(|((cond, lhs), rhs)| (Condition::Binary { cond, lhs, rhs }, false))
+        .map(|((cond, lhs), rhs)| Condition::Binary { cond, lhs, rhs })
         .or(select! {
             Token::Bgez => UnCond::Gez,
             Token::Bgtz => UnCond::Gtz,
@@ -321,25 +323,29 @@ fn parse_instruction<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>
         }
         .labelled("linking unary branch operation")
         .map(|cond| (true, cond)))
-        .then(parse_value())
-        .map(|((link, cond), src)| (Condition::Unary { cond, src }, link)))
+        .then(parse_register())
+        .map(|((link, cond), src)| Condition::Unary { cond, src, link }))
         .then_ignore(just(Token::Comma))
         .then(parse_address())
-        .map(|((cond, link), target)| Instruction::Branch { cond, target, link }),
-        select!(Token::J | Token::B => false, Token::Jal => true)
+        .map(|(cond, target)| Instruction::Branch { cond, target }),
+        select!(Token::J | Token::B => None, Token::Jal => Some(Register::Ra))
             .labelled("static jump operation")
-            .then(parse_address().map(Value::Constant))
-            .or(select!(Token::Jr => false, Token::Jalr => true)
-                .labelled("dynamic jump operation")
-                .then(parse_register().map(Value::Dynamic)))
+            .then(parse_address().map(Value::Immediate))
+            .or(just(Token::Jr)
+                .ignore_then(parse_register().map(Value::Dynamic))
+                .map(|target| (None, target)))
+            .or(just(Token::Jalr)
+                .ignore_then(parse_register().map(Value::Dynamic))
+                .then(parse_register().or_not())
+                .map(|(target, link)| (Some(link.unwrap_or(Register::Ra)), target)))
             .map(|(link, target)| Instruction::Jump { target, link }),
         select! {
-            Token::Teq | Token::Teqi => BinCond::Eq,
-            Token::Tne | Token::Tnei => BinCond::Ne,
-            Token::Tge | Token::Tgei => BinCond::Ge,
-            Token::Tgeu | Token::Tgeiu => BinCond::Geu,
-            Token::Tlt | Token::Tlti => BinCond::Lt,
-            Token::Tltu | Token::Tltiu => BinCond::Ltu,
+            Token::Teq | Token::Teqi => TrapCond::Eq,
+            Token::Tne | Token::Tnei => TrapCond::Ne,
+            Token::Tge | Token::Tgei => TrapCond::Ge,
+            Token::Tgeu | Token::Tgeiu => TrapCond::Geu,
+            Token::Tlt | Token::Tlti => TrapCond::Lt,
+            Token::Tltu | Token::Tltiu => TrapCond::Ltu,
         }
         .labelled("trap operation")
         .then(parse_register())
@@ -348,7 +354,9 @@ fn parse_instruction<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>
         .map(|((cond, lhs), rhs)| Instruction::Trap { cond, lhs, rhs }),
         just(Token::Syscall).to(Instruction::Syscall),
         just(Token::Nop).to(Instruction::Nop),
-        just(Token::Break).to(Instruction::Break),
+        just(Token::Break)
+            .ignore_then(parse_number())
+            .map(Instruction::Break),
     ))
     .labelled("instruction")
 }
@@ -368,8 +376,8 @@ fn parse_register<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>>()
 
 fn parse_value<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>>()
 -> impl Parser<'a, I, Value, Extra<'a>> {
-    select!(Token::Number(n) => Value::Constant(n))
-        .labelled("number")
+    parse_number()
+        .map(Value::Immediate)
         .or(parse_register().map(Value::Dynamic))
         .labelled("value")
 }
@@ -382,4 +390,17 @@ fn parse_identifier<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>>
 fn newlines<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>>()
 -> Repeated<impl Parser<'a, I, (), Extra<'a>>, (), I, Extra<'a>> {
     just(Token::Newline).ignored().repeated()
+}
+
+fn parse_index<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>>()
+-> impl Parser<'a, I, Index<'a>, Extra<'a>> {
+    parse_address()
+        .then(
+            just(Token::LParen)
+                .ignore_then(parse_register())
+                .then_ignore(just(Token::RParen))
+                .or_not(),
+        )
+        .map(|(offset, addr)| Index { offset, addr })
+        .labelled("index")
 }

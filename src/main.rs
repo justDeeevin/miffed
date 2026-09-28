@@ -12,7 +12,7 @@ fn main() -> Result<()> {
     let args = cli::parse();
 
     let source = std::fs::read_to_string(&args.file).context("Failed to read file")?;
-    let ast = miffed::parse::parse_program(&source);
+    let ast = miffed::parse::parse_program(&source, args.delay_slot);
 
     let path_str = args.file.display().to_string();
     for error in ast.errors() {
@@ -29,7 +29,19 @@ fn main() -> Result<()> {
             .eprint((path_str.as_str(), Source::from(source.as_str())));
     }
 
-    dbg!(ast.output());
+    let Some(ast) = ast.into_output() else {
+        return Ok(());
+    };
+
+    dbg!(&ast);
+
+    let machine = miffed::exec::Machine::try_from(ast)?;
+    let mut buf = [0; 4];
+
+    machine
+        .memory
+        .read(machine.memory.last_executable_address + 1, &mut buf)?;
+    dbg!(buf);
 
     Ok(())
 }

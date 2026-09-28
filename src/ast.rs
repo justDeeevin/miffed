@@ -5,6 +5,7 @@ use thiserror::Error;
 pub struct Program<'a> {
     pub data: Vec<Data<'a>>,
     pub text: Vec<(Option<&'a str>, Instruction<'a>)>,
+    pub delay_slot: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -27,41 +28,56 @@ pub enum Instruction<'a> {
     },
     La {
         dst: Register,
-        addr: Address<'a>,
+        index: Index<'a>,
     },
     Mem {
         op: MemOp,
         reg: Register,
-        offset: Address<'a>,
-        addr: Option<Register>,
+        index: Index<'a>,
         width: Width,
     },
     Branch {
         cond: Condition,
         target: Address<'a>,
-        link: bool,
     },
     Jump {
         target: Value<Address<'a>>,
-        link: bool,
+        link: Option<Register>,
     },
     Trap {
-        cond: BinCond,
+        cond: TrapCond,
         lhs: Register,
         rhs: Value,
     },
     Syscall,
     Nop,
-    Break,
+    Break(i32),
 }
 
 #[derive(Debug, Clone)]
+pub struct Index<'a> {
+    pub offset: Address<'a>,
+    pub addr: Option<Register>,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(i32)]
+pub enum TrapCond {
+    Ge,
+    Geu,
+    Lt,
+    Ltu,
+    Eq,
+    Ne = 6,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemOp {
     Load,
     Store,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum Width {
     Byte,
     ByteUnaligned,
@@ -88,11 +104,12 @@ pub enum Condition {
     },
     Unary {
         cond: UnCond,
-        src: Value,
+        src: Register,
+        link: bool,
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum UnCond {
     Gez,
     Gtz,
@@ -102,7 +119,7 @@ pub enum UnCond {
     Nez,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum BinCond {
     Eq,
     Ne,
@@ -116,12 +133,20 @@ pub enum BinCond {
     Ltu,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum Unop {
     Abs,
     Clo,
     Clz,
+    Div,
+    Divu,
+    Madd,
+    Maddu,
     Move,
+    Msub,
+    Msubu,
+    Mult,
+    Multu,
     Neg,
     Negu,
     Not,
@@ -129,7 +154,7 @@ pub enum Unop {
     Li,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum Binop {
     Add,
     Addu,
@@ -141,15 +166,9 @@ pub enum Binop {
     Divu,
     Movn,
     Movz,
-    Mult,
-    Multu,
     Mul,
     Mulo,
     Mulou,
-    Madd,
-    Maddu,
-    Msub,
-    Msubu,
     Nor,
     Or,
     Ori,
@@ -182,8 +201,8 @@ pub enum Binop {
 }
 
 #[derive(Debug, Clone)]
-pub enum Value<C = i32, D = Register> {
-    Constant(C),
+pub enum Value<I = i32, D = Register> {
+    Immediate(I),
     Dynamic(D),
 }
 
@@ -200,6 +219,34 @@ pub enum Constant<'a> {
     Words(Vec<i32>),
     Space(usize),
     String { contents: Cow<'a, str>, z: bool },
+}
+
+impl Constant<'_> {
+    pub fn size(&self) -> usize {
+        match self {
+            Self::Bytes(bytes) => bytes.len(),
+            Self::Halves(halves) => halves.len() * 2,
+            Self::Words(words) => words.len() * 4,
+            Self::Space(size) => *size,
+            Self::String { contents, z } => contents.len() + *z as usize,
+        }
+    }
+
+    pub fn bytes(self) -> Vec<u8> {
+        match self {
+            Self::Bytes(bytes) => bytes.into_iter().map(|b| b as u8).collect(),
+            Self::Halves(halves) => halves.into_iter().flat_map(|h| h.to_ne_bytes()).collect(),
+            Self::Words(words) => words.into_iter().flat_map(|w| w.to_ne_bytes()).collect(),
+            Self::Space(size) => vec![0; size],
+            Self::String { contents, z } => {
+                let mut out = contents.into_owned().into_bytes();
+                if z {
+                    out.push(0);
+                }
+                out
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -244,6 +291,8 @@ pub enum RegisterParseError {
     NoPrefix,
     #[error("Invalid register \"{0}\"")]
     InvalidRegister(String),
+    #[error("$at is reserved")]
+    AtUsed,
 }
 
 impl FromStr for Register {
@@ -252,7 +301,7 @@ impl FromStr for Register {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.strip_prefix('$').ok_or(RegisterParseError::NoPrefix)? {
             "zero" => Ok(Self::Zero),
-            "at" => Ok(Self::At),
+            "at" => Err(RegisterParseError::AtUsed),
             "v0" => Ok(Self::V0),
             "v1" => Ok(Self::V1),
             "a0" => Ok(Self::A0),

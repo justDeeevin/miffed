@@ -6,6 +6,9 @@ use std::path::PathBuf;
 pub struct Args {
     #[arg()]
     pub file: PathBuf,
+    #[arg(short, long)]
+    /// Enable branch delay slot
+    pub delay_slot: bool,
 }
 
 pub fn parse() -> Args {

@@ -4,16 +4,20 @@ use Token::*;
 use logos::{Lexer, Logos};
 use strum::Display;
 
-#[derive(Default, Clone, PartialEq, Debug)]
+#[derive(Default, Clone, Copy, PartialEq, Debug)]
 pub enum LexError {
     UnknownRegister,
+    AtUsed,
     #[default]
     UnknownToken,
 }
 
 impl From<RegisterParseError> for LexError {
-    fn from(_value: RegisterParseError) -> Self {
-        LexError::UnknownRegister
+    fn from(value: RegisterParseError) -> Self {
+        match value {
+            RegisterParseError::AtUsed => LexError::AtUsed,
+            _ => LexError::UnknownRegister,
+        }
     }
 }
 
@@ -42,7 +46,7 @@ pub enum Token<'a> {
     /// Peudo-instruction expansion:
     /// ```asm
     /// addu $1, $2, $zero # Expansion of move
-    /// bgez $2, 8 # skip sub
+    /// bgez $2, 4 # skip sub
     /// sub $1, $zero, $2
     /// ```
     Abs,
@@ -67,7 +71,7 @@ pub enum Token<'a> {
     #[token("div")]
     /// Three-operand form pseudo-instruction expansion:
     /// ```asm
-    /// tnei $3, zero
+    /// teqi $3, zero
     /// div $2, $3
     /// mflo $1
     /// ```
@@ -162,13 +166,13 @@ pub enum Token<'a> {
     /// Pseudo-instruction expansion:
     /// ```asm
     /// # immediate shamt
-    /// srl $at, $2, (32 - shamt)
-    /// sll $1, $2, shamt
+    /// srl $at, $2, {32 - shamt}
+    /// sll $1, $2, {shamt}
     /// or $1, $1, $at
     ///
     /// # register shamt
     /// subu $at, $zero, $3
-    /// slrv $at, $2, $at
+    /// srlv $at, $2, $at
     /// sllv $1, $2, $3
     /// or $1, $1, $at
     /// ```
@@ -177,13 +181,13 @@ pub enum Token<'a> {
     /// Pseudo-instruction expansion:
     /// ```asm
     /// # immediate shamt
-    /// srl $at, $2, shamt
-    /// sll $1, $2, (32 - shamt)
+    /// srl $at, $2, {shamt}
+    /// sll $1, $2, {32 - shamt}
     /// or $1, $1, $at
     ///
     /// # register shamt
     /// subu $at, $zero, $3
-    /// slrv $1, $2, $3
+    /// srlv $1, $2, $3
     /// sllv $at, $2, $at
     /// or $1, $1, $at
     /// ```
@@ -273,10 +277,7 @@ pub enum Token<'a> {
     Sne,
 
     #[token("b")]
-    /// Pseudo-instruction expansion:
-    /// ```asm
-    /// beq $zero, $zero, offset
-    /// ```
+    /// Synonym for [`J`]
     B,
     #[token("beq")]
     Beq,
@@ -297,14 +298,14 @@ pub enum Token<'a> {
     #[token("beqz")]
     /// Pseudo-instruction expansion:
     /// ```asm
-    /// beq $1, $zero, offset
+    /// beq $1, $zero, {offset}
     /// ```
     Beqz,
     #[token("bge")]
     /// Pseudo-instruction expansion:
     /// ```asm
     /// slt $at, $1, $2
-    /// beq $at, $zero, offset
+    /// beq $at, $zero, {offset}
     /// ```
     Bge,
     #[token("bgeu")]
@@ -313,8 +314,8 @@ pub enum Token<'a> {
     #[token("bgt")]
     /// Pseeudo-instruction expansion:
     /// ```asm
-    /// slt $at, $1, $2
-    /// bne $at, $zero, offset
+    /// slt $at, $2, $1
+    /// bne $at, $zero, {offset}
     /// ```
     Bgt,
     #[token("bgtu")]
@@ -324,7 +325,7 @@ pub enum Token<'a> {
     /// Pseudo-instruction expansion:
     /// ```asm
     /// slt $at, $2, $1
-    /// beq $at, $zero, offset
+    /// beq $at, $zero, {offset}
     /// ```
     Ble,
     #[token("bleu")]
@@ -333,8 +334,8 @@ pub enum Token<'a> {
     #[token("blt")]
     /// Pseudo-instruction expansion:
     /// ```asm
-    /// slt $at, $2, $1
-    /// bne $at, $zero, offset
+    /// slt $at, $1, $2
+    /// bne $at, $zero, {offset}
     /// ```
     Blt,
     #[token("bltu")]
@@ -343,7 +344,7 @@ pub enum Token<'a> {
     #[token("bnez")]
     /// Pseudo-instruction expansion:
     /// ```asm
-    /// bne $1, $zero, offset
+    /// bne $1, $zero, {offset}
     /// ```
     Bnez,
 
